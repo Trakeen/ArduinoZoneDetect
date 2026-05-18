@@ -1,0 +1,22 @@
+{
+  "name": "ArduinoZoneDetect",
+  "version": "1.0.0",
+  "description": "Timezone detection from GPS coordinates using ZoneDetect binary files, with DST (summer/winter time) support. Compatible with Arduino and ESP32.",
+  "keywords": ["timezone", "GPS", "latitude", "longitude", "DST", "zonedetect", "SD", "ESP32"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/ArduinoZoneDetect"
+  },
+  "authors": [
+    {
+      "name": "ArduinoZoneDetect contributors"
+    }
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/yourusername/ArduinoZoneDetect",
+  "frameworks": ["arduino"],
+  "platforms": ["*"],
+  "build": {
+    "srcDir": "src"
+  }
+}
