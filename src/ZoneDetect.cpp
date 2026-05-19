@@ -2,96 +2,115 @@
 #include <string.h>
 
 // ============================================================
-//  ZoneDetect binary file format (BertoldVdb/ZoneDetect)
+//  ZoneDetect binary file format (BertoldVdb/ZoneDetect, version 0)
 //
-//  Offset 0   : uint32 LE – tableEnd    (end of lookup table)
-//  Offset 4   : uint32 LE – metaOffset  (start of metadata section)
-//  Offset 8   : uint32 LE – dataOffset  (start of polygon data)
-//  Offset 12+ : lookup table  [tableEnd-12 bytes, array of uint32]
-//  dataOffset : polygon records (variable-length encoded)
-//  metaOffset : field-name list, then string pool
+//  Bytes 0-2   : "PLB" magic
+//  Byte  3     : tableType
+//  Byte  4     : version  (0 = supported; 1 = unsupported)
+//  Byte  5     : precision (e.g. 21 or 16)
+//  Byte  6     : numFields
+//  Then numFields ZDParseString field names
+//  Then one ZDParseString copyright notice
+//  Then three unsigned varints: s0, s1, s2  (section byte lengths)
+//  bboxOffset  = <index after above>
+//  metaOffset  = bboxOffset + s0
+//  dataOffset  = metaOffset + s1
+//  fileSize    = dataOffset + s2
+//
+//  Bbox section [bboxOffset, metaOffset):
+//    Entries sorted ascending by bbMinLat. Per entry:
+//      bbMinLat, bbMinLon, bbMaxLat, bbMaxLon : signed ZigZag varints
+//      metadataIndexDelta                     : signed ZigZag varint
+//      polygonIndexDelta                      : unsigned varint
+//    Cumulative sums give byte offsets into metadata / data sections.
+//
+//  ZDParseString encoding:
+//    - Read unsigned varint strLength
+//    - If strLength >= 256 : back-reference; seek to metaOffset + strLength - 256,
+//      read new strLength varint, read strLength bytes XOR 0x80
+//    - Else : read strLength bytes XOR 0x80 from current position (advance pos)
 // ============================================================
 
 ZoneDetect::ZoneDetect()
-    : _rdr(nullptr), _tableEnd(0), _metaOffset(0), _dataOffset(0),
-      _precision(0), _numFields(0), _error("not initialised") {}
+    : _rdr(nullptr), _bboxOffset(0), _metaOffset(0), _dataOffset(0),
+      _version(0), _precision(0), _numFields(0), _error("not initialised") {}
 
-// ---- helpers ----------------------------------------------------------------
+// ---- low-level I/O ----------------------------------------------------------
 
-bool ZoneDetect::seekTo(uint32_t pos)
-{
-    return _rdr->seek(pos);
-}
+bool ZoneDetect::seekTo(uint32_t pos) { return _rdr->seek(pos); }
 
-uint8_t ZoneDetect::rb()
-{
+uint8_t ZoneDetect::rb() {
     uint8_t b = 0;
     _rdr->readBytes(&b, 1);
     return b;
 }
 
-uint32_t ZoneDetect::readU32(uint32_t pos)
-{
-    seekTo(pos);
-    uint8_t buf[4];
-    if (_rdr->readBytes(buf, 4) != 4) return 0;
-    return (uint32_t)buf[0] | ((uint32_t)buf[1] << 8) |
-           ((uint32_t)buf[2] << 16) | ((uint32_t)buf[3] << 24);
-}
+// ---- varint helpers ---------------------------------------------------------
 
-uint8_t ZoneDetect::readU8(uint32_t pos)
+uint64_t ZoneDetect::readUV(uint32_t &pos)
 {
     seekTo(pos);
-    return rb();
-}
-
-uint64_t ZoneDetect::readVarUint(uint32_t &pos)
-{
-    seekTo(pos);
-    uint64_t result = 0;
-    uint8_t  shift  = 0;
-    uint8_t  b;
+    uint64_t v = 0;
+    uint8_t  shift = 0, b;
     do {
         b = rb();
         pos++;
-        result |= (uint64_t)(b & 0x7F) << shift;
-        shift  += 7;
+        v |= (uint64_t)(b & 0x7F) << shift;
+        shift += 7;
     } while (b & 0x80);
-    return result;
+    return v;
 }
 
-int64_t ZoneDetect::readVarInt(uint32_t &pos)
+// ZigZag decode: 0→0, 1→-1, 2→1, 3→-2, 4→2, …
+int64_t ZoneDetect::readSV(uint32_t &pos)
 {
-    uint64_t u = readVarUint(pos);
-    // ZigZag decode
-    return (int64_t)((u >> 1) ^ (-(int64_t)(u & 1)));
+    uint64_t u = readUV(pos);
+    return (u & 1) ? -(int64_t)(u >> 1) - 1 : (int64_t)(u >> 1);
 }
 
-bool ZoneDetect::readStr(uint32_t &pos, char *buf, size_t bufLen)
+// ---- string parser ----------------------------------------------------------
+
+bool ZoneDetect::parseString(uint32_t &pos, char *buf, size_t bufLen)
 {
-    seekTo(pos);
+    uint64_t strLen = readUV(pos);
+
+    uint32_t strPos;
+    if (strLen >= 256) {
+        // Back-reference: string bytes live in the metadata section.
+        strPos = _metaOffset + (uint32_t)(strLen - 256);
+        seekTo(strPos);
+        // Read the actual length from the back-reference location.
+        uint64_t refLen = 0;
+        uint8_t  shift  = 0, b;
+        do {
+            b = rb(); strPos++;
+            refLen |= (uint64_t)(b & 0x7F) << shift;
+            shift += 7;
+        } while (b & 0x80);
+        strLen = refLen;
+        // pos is NOT advanced past string bytes; they live elsewhere.
+    } else {
+        strPos = pos;
+        pos   += (uint32_t)strLen;   // advance caller's position past string
+    }
+
+    // Copy strLen XOR-0x80 bytes into buf
+    seekTo(strPos);
     size_t i = 0;
-    while (i < bufLen - 1) {
+    for (uint64_t j = 0; j < strLen; j++) {
         uint8_t c = rb();
-        pos++;
-        buf[i++] = (char)c;
-        if (c == 0) return true;
+        if (i < bufLen - 1) buf[i++] = (char)(c ^ 0x80);
     }
     buf[i] = 0;
-    // skip rest
-    while (rb() != 0) pos++;
-    pos++;
     return true;
 }
 
-int32_t ZoneDetect::toFixed(float deg) const
+// ---- coordinate conversion --------------------------------------------------
+
+int32_t ZoneDetect::toFixed(float coord, float scale) const
 {
-    // Map [-90,90] or [-180,180] to fixed-point with _precision bits
-    // latFP = lat_deg * 2^precision / 90   (for lat)
-    // lonFP = lon_deg * 2^precision / 180  (for lon, same scale)
-    // The file uses lat/lon in the same coordinate space:
-    //   value = degrees * (1<<precision) / 90
-    return (int32_t)(deg * (float)(1UL << _precision) / 90.0f);
+    // ZDFloatToFixedPoint: coord/scale * (1 << (precision-1))
+    return (int32_t)(coord / scale * (float)(1UL << (_precision - 1)));
 }
 
 // ---- initialisation ---------------------------------------------------------
@@ -102,169 +121,133 @@ bool ZoneDetect::begin(ZDReader *reader)
     _error = nullptr;
 
     uint32_t fileSize = reader->fileSize();
-    if (fileSize < 16) { _error = "file too small"; return false; }
+    if (fileSize < 12) { _error = "file too small"; return false; }
 
-    // File header (3 × uint32 LE):
-    //   [0]  tableEnd      – end of lat-band lookup table
-    //   [4]  metaOffset    – start of metadata (field names + string pool)
-    //   [8]  dataOffset    – start of polygon data
-    // Layout in file: header → lookup table → polygon data → metadata
-    // So the expected ordering is: 12 ≤ tableEnd ≤ dataOffset ≤ metaOffset
-    _tableEnd   = readU32(0);
-    _metaOffset = readU32(4);
-    _dataOffset = readU32(8);
-
-    // Validate: offsets must be within the file; tableEnd must be after header
-    if (_tableEnd  < 12      || _tableEnd  > fileSize ||
-        _dataOffset > fileSize || _metaOffset > fileSize) {
-        _error = "bad header";
+    // Verify "PLB" magic
+    seekTo(0);
+    uint8_t magic[3];
+    reader->readBytes(magic, 3);
+    if (magic[0] != 'P' || magic[1] != 'L' || magic[2] != 'B') {
+        _error = "bad magic (expected PLB)";
         return false;
     }
 
-    // Precision: stored as a single byte right after the 12-byte header.
-    // (timezone21.bin → 21, timezone16.bin → 16)
-    // Fall back to table-size heuristic if the byte looks wrong.
-    uint8_t precByte = readU8(12);
-    if (precByte == 16 || precByte == 21) {
-        _precision = precByte;
-    } else {
-        uint32_t numTableEntries = (_tableEnd - 12) / 4;
-        _precision = (numTableEntries <= 512) ? 16 : 21;
+    // Fixed header: tableType, version, precision, numFields
+    uint8_t hdr[4];
+    reader->readBytes(hdr, 4);
+    _version   = hdr[1];
+    _precision = hdr[2];
+    _numFields = hdr[3];
+    if (_numFields > 6) _numFields = 6;
+
+    if (_version != 0) {
+        _error = "unsupported version (use files from database/out/, not out_v1/)";
+        return false;
     }
 
-    // Read field names from metadata section.
-    // Format: pairs of null-terminated strings (name, type) until empty name.
-    uint32_t pos = _metaOffset;
-    _numFields = 0;
-    while (_numFields < 6 && pos < fileSize) {
-        char name[24];
-        readStr(pos, name, sizeof(name));
-        if (name[0] == 0) break;
-        strncpy(_fieldName[_numFields], name, sizeof(_fieldName[0]) - 1);
-        _numFields++;
-        char type[4];
-        readStr(pos, type, sizeof(type));  // skip type string
+    uint32_t pos = 7;  // after "PLB" + 4-byte fixed header
+
+    // Parse numFields field names (ZDParseString each)
+    for (uint8_t i = 0; i < _numFields; i++) {
+        parseString(pos, _fieldName[i], sizeof(_fieldName[0]));
+    }
+
+    // Skip copyright notice
+    {
+        char tmp[4];
+        parseString(pos, tmp, sizeof(tmp));
+    }
+
+    // Three section-size varints
+    uint64_t s0 = readUV(pos);
+    uint64_t s1 = readUV(pos);
+    uint64_t s2 = readUV(pos);
+
+    _bboxOffset = pos;
+    _metaOffset = (uint32_t)(_bboxOffset + s0);
+    _dataOffset = (uint32_t)(_metaOffset + s1);
+
+    if (_metaOffset > fileSize || _dataOffset > fileSize) {
+        _error = "bad offsets";
+        return false;
+    }
+    if ((uint32_t)(_dataOffset + s2) != fileSize) {
+        _error = "section sizes do not match file size";
+        return false;
     }
 
     _error = nullptr;
     return true;
 }
 
-// ---- point-in-polygon -------------------------------------------------------
+// ---- point-in-polygon (winding number) --------------------------------------
 
-// Returns 1=inside, 0=outside, 2=on-border, -1=error
-// Updates nextPoly to the byte offset right after this polygon record.
-int ZoneDetect::pointInPolygon(uint32_t polyBase, int32_t latFP, int32_t lonFP,
-                                uint32_t &nextPoly)
+int ZoneDetect::pointInPolygon(uint32_t polyBase, int32_t latFP, int32_t lonFP)
 {
     uint32_t pos = polyBase;
+    uint64_t numVerts = readUV(pos);
+    if (numVerts == 0) return 0;
 
-    // Polygon header: metaRef (varuint) + bounding-box (4 varints)
-    uint64_t metaRef = readVarUint(pos); (void)metaRef;
+    int64_t curLat = 0, curLon = 0;
+    int64_t prevLat = 0, prevLon = 0;
+    int     winding = 0;
 
-    int64_t bbLatMin = readVarInt(pos);
-    int64_t bbLatMax = bbLatMin + (int64_t)readVarUint(pos);
-    int64_t bbLonMin = readVarInt(pos);
-    int64_t bbLonMax = bbLonMin + (int64_t)readVarUint(pos);
+    for (uint64_t v = 0; v < numVerts; v++) {
+        int64_t dLat = readSV(pos);
+        int64_t dLon = readSV(pos);
 
-    uint64_t numVerts = readVarUint(pos);
+        prevLat = curLat;
+        prevLon = curLon;
+        curLat += dLat;
+        curLon += dLon;
 
-    // Quick bounding-box reject
-    bool inBB = (latFP >= bbLatMin && latFP <= bbLatMax &&
-                 lonFP >= bbLonMin && lonFP <= bbLonMax);
-
-    int result = 0;  // outside
-
-    if (inBB) {
-        // Ray-casting: count crossings of horizontal ray at lat = latFP
-        int64_t prevLat = 0, prevLon = 0;
-        int64_t curLat  = 0, curLon  = 0;
-        bool onBorder = false;
-        int crossings = 0;
-
-        for (uint64_t v = 0; v < numVerts; v++) {
-            int64_t dLat = readVarInt(pos);
-            int64_t dLon = readVarInt(pos);
-
+        if (v == 0) {
+            // First vertex is absolute; no edge to test yet.
             prevLat = curLat;
             prevLon = curLon;
-            curLat += dLat;
-            curLon += dLon;
-
-            if (v == 0) { prevLat = curLat; prevLon = curLon; continue; }
-
-            // Check if point is exactly on this segment's vertex
-            if (curLat == latFP && curLon == lonFP) { onBorder = true; break; }
-
-            // Check crossing
-            if ((curLat > latFP) != (prevLat > latFP)) {
-                // compute lon of crossing
-                int64_t crossLon = prevLon +
-                    (int64_t)((int64_t)(latFP - prevLat) * (curLon - prevLon) /
-                               (curLat - prevLat));
-                if (crossLon == lonFP) { onBorder = true; break; }
-                if (crossLon > lonFP)  crossings++;
-            }
+            continue;
         }
 
-        if (onBorder) {
-            result = 2;
-        } else {
-            result = (crossings & 1) ? 1 : 0;
-        }
-    } else {
-        // Still need to skip vertex data
-        for (uint64_t v = 0; v < numVerts; v++) {
-            readVarInt(pos);
-            readVarInt(pos);
+        // Winding-number edge contribution
+        if (prevLat <= (int64_t)latFP && curLat > (int64_t)latFP) {
+            // Upward crossing
+            int64_t cross = (curLon - prevLon) * ((int64_t)latFP - prevLat)
+                          - ((int64_t)lonFP   - prevLon) * (curLat - prevLat);
+            if (cross > 0)      winding += 2;
+            else if (cross == 0) return 2;   // on edge
+        } else if (curLat <= (int64_t)latFP && prevLat > (int64_t)latFP) {
+            // Downward crossing
+            int64_t cross = (curLon - prevLon) * ((int64_t)latFP - prevLat)
+                          - ((int64_t)lonFP   - prevLon) * (curLat - prevLat);
+            if (cross < 0)      winding -= 2;
+            else if (cross == 0) return 2;   // on edge
         }
     }
 
-    nextPoly = pos;
-    return result;
+    return (winding != 0) ? 1 : 0;
 }
 
 // ---- metadata extraction ----------------------------------------------------
 
-bool ZoneDetect::fillMatch(uint32_t metaRef, ZDMatch &m)
+bool ZoneDetect::fillMatch(uint32_t metaIndex, ZDMatch &m)
 {
-    m.tzId[0]    = 0;
+    m.tzId[0]      = 0;
     m.countryA2[0] = 0;
 
-    // metaRef is an offset from metaOffset+fieldListSize into the string pool.
-    // In the actual file, metadata records are stored as sequential var-length
-    // field values right after the field name list.
-    // Each record: one string per field, in field-name order.
+    uint32_t pos = _metaOffset + metaIndex;
 
-    uint32_t pos = _metaOffset;
-
-    // Skip field name list to find start of string pool
-    for (uint8_t i = 0; i < _numFields; i++) {
-        char tmp[24];
-        readStr(pos, tmp, sizeof(tmp));  // name
-        readStr(pos, tmp, sizeof(tmp));  // type
-    }
-    pos++; // skip final empty name
-
-    // Skip 'metaRef' records to reach the one we want
-    for (uint32_t r = 0; r < metaRef; r++) {
-        for (uint8_t f = 0; f < _numFields; f++) {
-            char tmp[64];
-            readStr(pos, tmp, sizeof(tmp));
-        }
-    }
-
-    // Read this record's fields
     for (uint8_t f = 0; f < _numFields; f++) {
         char val[64];
-        readStr(pos, val, sizeof(val));
+        parseString(pos, val, sizeof(val));
 
         const char *name = _fieldName[f];
         if (strcmp(name, "TimezoneId") == 0 || strcmp(name, "timezone_id") == 0) {
             strncpy(m.tzId, val, sizeof(m.tzId) - 1);
+            m.tzId[sizeof(m.tzId) - 1] = 0;
         } else if (strcmp(name, "CountryAlpha2") == 0 ||
-                   strcmp(name, "country_a2") == 0) {
+                   strcmp(name, "country_a2")    == 0) {
             strncpy(m.countryA2, val, sizeof(m.countryA2) - 1);
+            m.countryA2[sizeof(m.countryA2) - 1] = 0;
         }
     }
 
@@ -277,60 +260,43 @@ int ZoneDetect::lookup(float lat, float lon, ZDMatch *out, uint8_t maxResults)
 {
     if (!_rdr || _error) return -1;
 
-    int32_t latFP = toFixed(lat);
-    int32_t lonFP = toFixed(lon);
+    int32_t latFP = toFixed(lat,  90.0f);
+    int32_t lonFP = toFixed(lon, 180.0f);
 
-    uint32_t numTableEntries = (_tableEnd - 12) / 4;
-    if (numTableEntries == 0) { _error = "empty table"; return -1; }
+    uint32_t pos      = _bboxOffset;
+    int64_t  metaIdx  = 0;   // cumulative byte offset into metadata section
+    int64_t  polyIdx  = 0;   // cumulative byte offset into polygon data section
+    int      found    = 0;
 
-    // Map lat to table index
-    // latFP range: [-2^precision, +2^precision]  for [-90,+90]
-    // table index: linearly mapped to [0, numTableEntries)
-    int32_t maxFP = (int32_t)(1UL << _precision);
-    int64_t idx64 = ((int64_t)(latFP + maxFP) * numTableEntries) / ((int64_t)maxFP * 2);
-    if (idx64 < 0) idx64 = 0;
-    if (idx64 >= (int64_t)numTableEntries) idx64 = (int64_t)numTableEntries - 1;
+    while (found < maxResults && pos < _metaOffset) {
+        int64_t  bbMinLat  = readSV(pos);
+        int64_t  bbMinLon  = readSV(pos);
+        int64_t  bbMaxLat  = readSV(pos);
+        int64_t  bbMaxLon  = readSV(pos);
+        int64_t  metaDelta = readSV(pos);
+        uint64_t polyDelta = readUV(pos);
 
-    uint32_t tableIdx = (uint32_t)idx64;
+        metaIdx += metaDelta;
+        polyIdx += (int64_t)polyDelta;
 
-    // The table entry at tableIdx gives the start of the polygon list for this lat band.
-    // We search downward from that entry until we get an end-marker or find our match.
-    uint32_t dataStart = readU32(12 + tableIdx * 4);
-    if (dataStart == 0) return 0;  // empty band
+        // Bbox section is sorted ascending by bbMinLat; early exit is safe.
+        if ((int64_t)latFP < bbMinLat) break;
 
-    uint32_t pos = _dataOffset + dataStart;
-    int found = 0;
+        // Bounding-box reject
+        if ((int64_t)latFP > bbMaxLat) continue;
+        if ((int64_t)lonFP < bbMinLon || (int64_t)lonFP > bbMaxLon) continue;
 
-    while (found < maxResults) {
-        if (pos >= _rdr->fileSize()) break;
+        // Full point-in-polygon test
+        uint32_t polyBase = _dataOffset + (uint32_t)polyIdx;
+        if (polyBase >= _rdr->fileSize()) { _error = "polygon offset out of range"; return -1; }
 
-        // Each polygon list entry: type byte, then polygon data
-        // type 0 = end of band list
-        // type 1 = normal polygon
-        // type 2 = excluded polygon (hole)
-        seekTo(pos);
-        uint8_t type = rb();
-        pos++;
-
-        if (type == 0) break;  // end of list for this band
-
-        uint64_t metaRef = readVarUint(pos);
-
-        uint32_t nextPoly = pos;
-        int pip = pointInPolygon(pos, latFP, lonFP, nextPoly);
-        pos = nextPoly;
-
-        if (pip < 0) { _error = "polygon parse error"; return -1; }
+        int pip = pointInPolygon(polyBase, latFP, lonFP);
 
         if (pip > 0) {
-            if (type == 1) {
-                // Inside a timezone polygon – fetch metadata
-                ZDMatch m;
-                if (fillMatch((uint32_t)metaRef, m)) {
-                    out[found++] = m;
-                }
+            ZDMatch m;
+            if (fillMatch((uint32_t)metaIdx, m)) {
+                out[found++] = m;
             }
-            // type == 2 would be an exclusion zone; we skip it here
         }
     }
 

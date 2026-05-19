@@ -38,7 +38,9 @@ struct ZDMatch {
 };
 
 // -------------------------------------------------------------------------
-// ZoneDetect – reads timezone21.bin or timezone16.bin from a ZDReader
+// ZoneDetect – reads timezone21.bin or timezone16.bin (version 0) from a
+// ZDReader.  Use the files from the BertoldVdb/ZoneDetect database/out/
+// directory (not out_v1 – version 1 polygon compression is not supported).
 // -------------------------------------------------------------------------
 class ZoneDetect {
 public:
@@ -59,35 +61,35 @@ public:
 
 private:
     ZDReader   *_rdr;
-    uint32_t    _tableEnd;
-    uint32_t    _metaOffset;
-    uint32_t    _dataOffset;
+    uint32_t    _bboxOffset;   // start of bbox (sorted polygon index) section
+    uint32_t    _metaOffset;   // start of metadata section
+    uint32_t    _dataOffset;   // start of polygon vertex data section
+    uint8_t     _version;
     uint8_t     _precision;
     uint8_t     _numFields;
-    char        _fieldName[6][24];  // up to 6 field names
+    char        _fieldName[6][24];
     const char *_error;
 
     // ---- low-level I/O --------------------------------------------------
     bool    seekTo(uint32_t pos);
-    uint8_t  rb();                      // read one byte (returns 0xFF on fail)
-    uint32_t readU32(uint32_t pos);
-    uint8_t  readU8(uint32_t pos);
+    uint8_t rb();                          // read one byte at current position
 
-    // ---- varint coding (ZoneDetect wire format) -------------------------
-    uint64_t readVarUint(uint32_t &pos);
-    int64_t  readVarInt(uint32_t &pos);
+    // ---- varint coding (LEB128) -----------------------------------------
+    uint64_t readUV(uint32_t &pos);        // unsigned varint, advances pos
+    int64_t  readSV(uint32_t &pos);        // ZigZag signed varint, advances pos
 
-    // ---- string (null-terminated) at position pos -----------------------
-    bool readStr(uint32_t &pos, char *buf, size_t bufLen);
+    // ---- string (ZDParseString format) ----------------------------------
+    // Reads length-prefixed XOR-0x80 string; handles back-references.
+    bool parseString(uint32_t &pos, char *buf, size_t bufLen);
 
     // ---- fixed-point conversion -----------------------------------------
-    int32_t toFixed(float deg) const;
+    // scale = 90.0 for latitude, 180.0 for longitude
+    int32_t toFixed(float coord, float scale) const;
 
     // ---- polygon engine -------------------------------------------------
-    // Returns: 1 = inside, 0 = outside, 2 = on border, -1 = parse error
-    int  pointInPolygon(uint32_t polyBase, int32_t latFP, int32_t lonFP,
-                        uint32_t &nextPoly);
+    // Returns: 1 = inside, 0 = outside, 2 = on border
+    int pointInPolygon(uint32_t polyBase, int32_t latFP, int32_t lonFP);
 
-    // Fill one ZDMatch from the metadata for a matched polygon
-    bool fillMatch(uint32_t metaRef, ZDMatch &m);
+    // Fill one ZDMatch from the metadata at byte offset metaIndex
+    bool fillMatch(uint32_t metaIndex, ZDMatch &m);
 };
