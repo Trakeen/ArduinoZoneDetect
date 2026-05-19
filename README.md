@@ -14,8 +14,11 @@ Bibliothèque PlatformIO/Arduino permettant de déterminer le fuseau horaire (IA
 
 | Fichier | Source |
 |---|---|
-| `timezone21.bin` ou `timezone16.bin` | [Télécharger ici](https://github.com/BertoldVdb/ZoneDetect/tree/master/database) |
+| `timezone21.bin` ou `timezone16.bin` | Répertoire `database/out/` du dépôt [BertoldVdb/ZoneDetect](https://github.com/BertoldVdb/ZoneDetect/tree/master/database) (**utiliser `out/`, pas `out_v1/`**) |
 | `dst_rules.bin` | Généré par `tools/generate_dst_bin.py` |
+
+> **Important :** utilisez uniquement les fichiers du répertoire `out/` (version 0).
+> Le répertoire `out_v1/` contient des fichiers compressés (version 1) qui ne sont pas pris en charge.
 
 ## Utilisation rapide
 
