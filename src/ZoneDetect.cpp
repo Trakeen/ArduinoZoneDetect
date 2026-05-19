@@ -101,39 +101,49 @@ bool ZoneDetect::begin(ZDReader *reader)
     _rdr   = reader;
     _error = nullptr;
 
+    uint32_t fileSize = reader->fileSize();
+    if (fileSize < 16) { _error = "file too small"; return false; }
+
+    // File header (3 × uint32 LE):
+    //   [0]  tableEnd      – end of lat-band lookup table
+    //   [4]  metaOffset    – start of metadata (field names + string pool)
+    //   [8]  dataOffset    – start of polygon data
+    // Layout in file: header → lookup table → polygon data → metadata
+    // So the expected ordering is: 12 ≤ tableEnd ≤ dataOffset ≤ metaOffset
     _tableEnd   = readU32(0);
     _metaOffset = readU32(4);
     _dataOffset = readU32(8);
 
-    if (_tableEnd < 12 || _metaOffset < _tableEnd || _dataOffset < _metaOffset) {
+    // Validate: offsets must be within the file; tableEnd must be after header
+    if (_tableEnd  < 12      || _tableEnd  > fileSize ||
+        _dataOffset > fileSize || _metaOffset > fileSize) {
         _error = "bad header";
         return false;
     }
 
-    // Read field names from metadata section
+    // Precision: stored as a single byte right after the 12-byte header.
+    // (timezone21.bin → 21, timezone16.bin → 16)
+    // Fall back to table-size heuristic if the byte looks wrong.
+    uint8_t precByte = readU8(12);
+    if (precByte == 16 || precByte == 21) {
+        _precision = precByte;
+    } else {
+        uint32_t numTableEntries = (_tableEnd - 12) / 4;
+        _precision = (numTableEntries <= 512) ? 16 : 21;
+    }
+
+    // Read field names from metadata section.
+    // Format: pairs of null-terminated strings (name, type) until empty name.
     uint32_t pos = _metaOffset;
     _numFields = 0;
-    while (_numFields < 6) {
+    while (_numFields < 6 && pos < fileSize) {
         char name[24];
         readStr(pos, name, sizeof(name));
         if (name[0] == 0) break;
         strncpy(_fieldName[_numFields], name, sizeof(_fieldName[0]) - 1);
         _numFields++;
-        // skip type char (one more null-term string)
         char type[4];
-        readStr(pos, type, sizeof(type));
-    }
-
-    // Determine precision from file size / data encoding
-    // timezone16.bin uses 16-bit, timezone21.bin uses 21-bit.
-    // The precision is stored implicitly via the table size heuristic:
-    // numEntries = (tableEnd - 12) / 4 = 2 * 2^precision / (unit)
-    // In practice: 16-bit file has 512 table entries (2*256), 21-bit has 16384.
-    uint32_t numTableEntries = (_tableEnd - 12) / 4;
-    if (numTableEntries <= 512) {
-        _precision = 16;
-    } else {
-        _precision = 21;
+        readStr(pos, type, sizeof(type));  // skip type string
     }
 
     _error = nullptr;
