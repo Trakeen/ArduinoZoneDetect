@@ -27,26 +27,34 @@ Bibliothèque PlatformIO/Arduino permettant de déterminer le fuseau horaire (IA
 #include "ZoneDetect.h"
 #include "DST.h"
 
-File tzFile = SD.open("/timezone21.bin");
-ZDFileReader<File> tzReader(tzFile);
-
 ZoneDetect zd;
-zd.begin(&tzReader);
+DST        dst;
 
-char tzId[48];
-zd.getTimezoneId(48.8584f, 2.2945f, tzId, sizeof(tzId));
-// tzId == "Europe/Paris"
+void setup() {
+    SD.begin();
 
-File dstFile = SD.open("/dst_rules.bin");
-ZDFileReader<File> dstReader(dstFile);
+    // Les fichiers et readers doivent survivre à setup() → déclarés static
+    static File               tzFile  = SD.open("/timezone21.bin");
+    static ZDFileReader<File> tzReader(tzFile);
+    zd.begin(&tzReader);
 
-DST dst;
-dst.begin(&dstReader);
+    static File               dstFile  = SD.open("/dst_rules.bin");
+    static ZDFileReader<File> dstReader(dstFile);
+    dst.begin(&dstReader);
+}
 
-int32_t utcNow = 1711846800L;  // 2024-03-31 01:00:00 UTC
-int32_t offset = dst.getUtcOffset(tzId, utcNow);  // +7200 (CEST = UTC+2)
-int32_t local  = dst.toLocalTime(tzId, utcNow);   // local Unix timestamp
+void loop() {
+    char tzId[48];
+    zd.getTimezoneId(48.8584f, 2.2945f, tzId, sizeof(tzId));
+    // tzId == "Europe/Paris"
+
+    int32_t utcNow = 1711846800L;  // 2024-03-31 01:00:00 UTC
+    int32_t offset = dst.getUtcOffset(tzId, utcNow);  // +7200 (CEST = UTC+2)
+    int32_t local  = dst.toLocalTime(tzId, utcNow);   // local Unix timestamp
+}
 ```
+
+> **Important :** les objets `File` et `ZDFileReader` doivent rester en vie aussi longtemps que `ZoneDetect` et `DST` sont utilisés. Déclarez-les `static` dans `setup()` ou comme variables globales — **jamais en variables locales non-statiques**, sinon le pointeur interne devient invalide et provoque un crash (`InstrFetchProhibited`).
 
 ## API
 
