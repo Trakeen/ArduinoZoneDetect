@@ -85,13 +85,13 @@ void setup()
 
         // Example UTC Unix timestamp: 2024-03-31 01:00:00 UTC
         // (France switches to summer time on this date)
-        int32_t utcNow = 1711846800L;
+        uint32_t utcNow = 1711846800UL;
 
         if (dstFile) {
-            int32_t offset = dst.getUtcOffset(tzId, utcNow);
-            if (offset != INT32_MIN) {
-                int h = offset / 3600;
-                int m = abs((offset % 3600) / 60);
+            int32_t offsetSec = 0;
+            if (dst.getUtcOffset(tzId, utcNow, offsetSec)) {
+                int h = (int)(offsetSec / 3600);
+                int m = (int)(abs((int)(offsetSec % 3600)) / 60);
                 Serial.print("UTC offset: ");
                 if (h >= 0) Serial.print('+');
                 Serial.print(h);
@@ -99,11 +99,15 @@ void setup()
                 if (m < 10) Serial.print('0');
                 Serial.println(m);
 
-                int32_t local = dst.toLocalTime(tzId, utcNow);
-                // Print as HH:MM:SS
-                int32_t tod = local % 86400;
+                // toLocalTime returns uint32_t; pass directly to DateTime if using RTClib:
+                //   #include <RTClib.h>
+                //   DateTime localDt(dst.toLocalTime(tzId, utcNow));
+                uint32_t localUnix = dst.toLocalTime(tzId, utcNow);
+                uint32_t tod = localUnix % 86400UL;
                 Serial.printf("Local time (HH:MM:SS): %02d:%02d:%02d\n",
                               (int)(tod / 3600), (int)((tod % 3600) / 60), (int)(tod % 60));
+            } else {
+                Serial.println("tzId not found in dst_rules.bin – run generate_dst_bin.py");
             }
         }
     } else {

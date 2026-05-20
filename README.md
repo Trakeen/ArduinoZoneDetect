@@ -48,9 +48,18 @@ void loop() {
     zd.getTimezoneId(48.8584f, 2.2945f, tzId, sizeof(tzId));
     // tzId == "Europe/Paris"
 
-    int32_t utcNow = 1711846800L;  // 2024-03-31 01:00:00 UTC
-    int32_t offset = dst.getUtcOffset(tzId, utcNow);  // +7200 (CEST = UTC+2)
-    int32_t local  = dst.toLocalTime(tzId, utcNow);   // local Unix timestamp
+    uint32_t utcNow = 1711846800UL;  // 2024-03-31 01:00:00 UTC
+
+    int32_t  offsetSec = 0;
+    if (dst.getUtcOffset(tzId, utcNow, offsetSec)) {
+        // offsetSec = +7200 (CEST = UTC+2)
+    } else {
+        // tzId not found in dst_rules.bin
+    }
+
+    uint32_t localUnix = dst.toLocalTime(tzId, utcNow);  // 0 = error
+    // Compatible with RTClib:
+    // DateTime localDt(localUnix);
 }
 ```
 
@@ -73,13 +82,19 @@ bool getTimezoneId(float lat, float lon, char *tzId, size_t bufLen);
 ### DST
 
 ```cpp
-bool    begin(ZDReader *reader);
-bool    getPosixTz(const char *tzId, char *posixTz, size_t bufLen);
-int32_t getUtcOffset(const char *tzId, int32_t unixTimestamp);
-int32_t toLocalTime(const char *tzId, int32_t unixTimestamp);
+bool begin(ZDReader *reader);
+bool getPosixTz(const char *tzId, char *posixTz, size_t bufLen);
+
+// Offset UTC en secondes. Renvoie false si tzId absent de dst_rules.bin.
+// Plage : -43 200 (UTC-12) … +50 400 (UTC+14) → int32_t requis (> int16_t max).
+bool getUtcOffset(const char *tzId, uint32_t utcUnix, int32_t &offsetSec);
+
+// Temps local Unix (= utcUnix + offset). Renvoie 0 en cas d'erreur.
+// Directement compatible RTClib : DateTime dt(dst.toLocalTime(tzId, utcUnix));
+uint32_t toLocalTime(const char *tzId, uint32_t utcUnix);
 
 // Utilisation sans fichier (chaîne POSIX TZ connue à l'avance)
-static int32_t parsePosixTz(const char *posixTz, int32_t unixTimestamp);
+static int32_t parsePosixTz(const char *posixTz, uint32_t utcUnix);
 ```
 
 ### ZDReader / ZDFileReader
