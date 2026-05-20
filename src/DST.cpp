@@ -94,18 +94,19 @@ bool DST::getPosixTz(const char *tzId, char *posixTz, size_t bufLen)
     return false;
 }
 
-int32_t DST::getUtcOffset(const char *tzId, int32_t t)
+bool DST::getUtcOffset(const char *tzId, uint32_t utcUnix, int32_t &offsetSec)
 {
     char posixTz[64];
-    if (!getPosixTz(tzId, posixTz, sizeof(posixTz))) return INT32_MIN;
-    return parsePosixTz(posixTz, t);
+    if (!getPosixTz(tzId, posixTz, sizeof(posixTz))) return false;
+    offsetSec = parsePosixTz(posixTz, utcUnix);
+    return true;
 }
 
-int32_t DST::toLocalTime(const char *tzId, int32_t t)
+uint32_t DST::toLocalTime(const char *tzId, uint32_t utcUnix)
 {
-    int32_t off = getUtcOffset(tzId, t);
-    if (off == INT32_MIN) return INT32_MIN;
-    return t + off;
+    int32_t off = 0;
+    if (!getUtcOffset(tzId, utcUnix, off)) return 0;
+    return utcUnix + (uint32_t)off;
 }
 
 // ============================================================
@@ -249,19 +250,19 @@ bool DST::parseTransitionRule(const char *&p, int year,
     return true;
 }
 
-// Convert Unix timestamp to calendar year
-static int unixToYear(int32_t t) {
+// Convert UTC Unix timestamp to calendar year
+static int unixToYear(uint32_t t) {
     int y = 1970;
     while (true) {
-        int32_t yLen = (DST::isLeapYear(y) ? 366 : 365) * 86400;
+        uint32_t yLen = (uint32_t)((DST::isLeapYear(y) ? 366 : 365) * 86400);
         if (t < yLen) return y;
         t -= yLen;
         y++;
-        if (y > 2100) return y;  // safety
+        if (y > 2106) return y;  // safety (uint32_t wraps ~2106)
     }
 }
 
-int32_t DST::parsePosixTz(const char *posixTz, int32_t t)
+int32_t DST::parsePosixTz(const char *posixTz, uint32_t t)
 {
     const char *p = posixTz;
     if (!p || !*p) return 0;
@@ -306,13 +307,14 @@ int32_t DST::parsePosixTz(const char *posixTz, int32_t t)
 
     // Northern hemisphere: DST active between start and end
     // Southern hemisphere: DST active outside (end < start)
+    int32_t tSigned = (int32_t)t;  // GPS Unix time fits in int32_t until 2038
     if (startSec < endSec) {
         // Northern: DST if start <= t < end
-        if (t >= startSec && t < endSec) return dstOff;
+        if (tSigned >= startSec && tSigned < endSec) return dstOff;
         return stdOff;
     } else {
         // Southern: DST if t >= start OR t < end
-        if (t >= startSec || t < endSec) return dstOff;
+        if (tSigned >= startSec || tSigned < endSec) return dstOff;
         return stdOff;
     }
 }
