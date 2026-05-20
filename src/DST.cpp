@@ -135,7 +135,7 @@ int DST::weekdayOfJan1(int y) {
     int yy = (m < 3) ? y - 1 : y;
     int k  = yy % 100, j = yy / 100;
     int h  = (d + (13 * (((m < 3) ? m + 12 : m) + 1)) / 5 + k + k/4 + j/4 - 2*j) % 7;
-    return (h + 5) % 7;  // 0=Sun
+    return (h + 6) % 7;  // 0=Sun  (Zeller h: 0=Sat,1=Sun,2=Mon,… → subtract 1 then mod 7)
 }
 
 // Skip std/dst name (letters or <...>)
@@ -304,6 +304,12 @@ int32_t DST::parsePosixTz(const char *posixTz, uint32_t t)
     if (!parseTransitionRule(p, year, endMon, endDay, endSec)) return stdOff;
 
     (void)startMon; (void)startDay; (void)endMon; (void)endDay;
+
+    // POSIX TZ transition times are in local wall-clock time, not UTC.
+    //   start time is expressed in local standard time  → convert to UTC: subtract stdOff
+    //   end   time is expressed in local DST time       → convert to UTC: subtract dstOff
+    startSec -= stdOff;
+    endSec   -= dstOff;
 
     // Northern hemisphere: DST active between start and end
     // Southern hemisphere: DST active outside (end < start)
